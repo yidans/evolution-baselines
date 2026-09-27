@@ -1,0 +1,1 @@
+{"schema_version":"local-link-prediction-config.v1","graph":"ca_GrQc_core","graph_seed":null,"split_seed":63000003,"test_fraction":0.1,"role":"quality","split_path":"splits/ca_GrQc_core/slot_01_04.json"}

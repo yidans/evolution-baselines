@@ -1,0 +1,1 @@
+{"schema_version":"local-link-prediction-config.v1","graph":"holme_kim_synthetic","graph_seed":62000108,"split_seed":61000108,"test_fraction":0.1,"role":"runtime_envelope","split_path":"configs/splits/ca_hepth/ca_hepth_runtime.json","node_count":400,"m":25,"p":0.7}

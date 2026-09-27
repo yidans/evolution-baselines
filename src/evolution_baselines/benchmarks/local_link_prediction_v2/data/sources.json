@@ -1,0 +1,18 @@
+[
+  {
+    "dataset": "ca-HepTh",
+    "url": "https://snap.stanford.edu/data/ca-HepTh.txt.gz",
+    "page": "https://snap.stanford.edu/data/ca-HepTh.html",
+    "bytes": 210596,
+    "license": "No explicit dataset license stated on the authoritative dataset page; source citation preserved. SNAP code BSD license is not assumed to license these data.",
+    "accessed_at": "2026-09-23T20:07:48.675828+00:00"
+  },
+  {
+    "dataset": "email-Eu-core",
+    "url": "https://snap.stanford.edu/data/email-Eu-core.txt.gz",
+    "page": "https://snap.stanford.edu/data/email-Eu-core.html",
+    "bytes": 79754,
+    "license": "No explicit dataset license stated on the authoritative dataset page; source citation preserved. SNAP code BSD license is not assumed to license these data.",
+    "accessed_at": "2026-09-23T20:07:48.963427+00:00"
+  }
+]

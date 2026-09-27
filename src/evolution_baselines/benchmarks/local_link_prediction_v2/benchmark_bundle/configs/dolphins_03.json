@@ -1,0 +1,1 @@
+{"schema_version":"local-link-prediction-config.v1","graph":"dolphins","graph_seed":null,"split_seed":61000002,"test_fraction":0.1,"role":"quality","split_path":"splits/dolphins/dolphins_03.json"}

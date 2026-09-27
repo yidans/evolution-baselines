@@ -1,0 +1,1 @@
+{"schema_version":"local-link-prediction-config.v1","graph":"email_eu","graph_seed":null,"split_seed":61000202,"test_fraction":0.1,"role":"quality","split_path":"configs/splits/email_eu/email_eu_03.json"}

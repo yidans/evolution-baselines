@@ -1,0 +1,1 @@
+{"schema_version":"local-link-prediction-config.v1","graph":"facebook_ego","graph_seed":null,"split_seed":63000107,"test_fraction":0.1,"role":"quality","split_path":"splits/facebook_ego/slot_02_08.json"}

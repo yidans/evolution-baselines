@@ -1,0 +1,1 @@
+{"schema_version":"local-link-prediction-config.v1","graph":"ca_hepth","graph_seed":null,"split_seed":61000103,"test_fraction":0.1,"role":"quality","split_path":"splits/ca_hepth/ca_hepth_04.json"}

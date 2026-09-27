@@ -1,0 +1,24 @@
+[
+  {
+    "family": "ca_hepth",
+    "source": "https://snap.stanford.edu/data/ca-HepTh.html",
+    "k": 8,
+    "raw_nodes": 9877,
+    "raw_edges": 25973,
+    "nodes": 285,
+    "edges": 2237,
+    "selection": "Before scoring: smallest k with full core 80 <= nodes <= 400; no component or AP selection",
+    "license": "No explicit dataset license on source page; retain attribution, do not assume SNAP software BSD license applies to data."
+  },
+  {
+    "family": "email_eu",
+    "source": "https://snap.stanford.edu/data/email-Eu-core.html",
+    "k": 22,
+    "raw_nodes": 1005,
+    "raw_edges": 16064,
+    "nodes": 394,
+    "edges": 10397,
+    "selection": "Before scoring: smallest k with full core 80 <= nodes <= 400; no component or AP selection",
+    "license": "No explicit dataset license on source page; retain attribution, do not assume SNAP software BSD license applies to data."
+  }
+]

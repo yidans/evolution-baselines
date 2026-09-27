@@ -1,0 +1,3 @@
+[
+  "\"\"\"Common Neighbors: the minimal exposed baseline (seed program).\"\"\"\nimport numpy as np\n\n\ndef score_candidates(adj, candidates):\n    return np.asarray([len(adj[u] & adj[v]) for u, v in candidates], dtype=float)\n"
+]
