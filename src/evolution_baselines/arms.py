@@ -13,10 +13,14 @@ import json
 import random
 import re
 import statistics
+import platform
+import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+from importlib.metadata import PackageNotFoundError, version
 
 from ._io import utc_now
 
@@ -60,6 +64,34 @@ def _sort_key(program: Program) -> tuple[int, int, float, str]:
     return (*program.rank_key(), program.id)
 
 
+def _environment(backend: str) -> dict[str, Any]:
+    """Record normal package/Git versions alongside the measured run."""
+    result: dict[str, Any] = {"python": sys.version.split()[0], "platform": platform.platform()}
+    for package in ("numpy", "evolution-baselines", "hermes-ai-professor"):
+        try:
+            result[package] = version(package)
+        except PackageNotFoundError:
+            result[package] = None
+    roots = {"baseline": Path(__file__).resolve().parents[2]}
+    if backend == "galahad":
+        from ai_professor.autonomy import qualification
+        from ai_professor.autonomy.isolation import _configured_evaluator_image, _selected_process_sandbox
+        roots["galahad"] = Path(qualification.__file__).resolve().parents[3]
+        result.update(sandbox=_selected_process_sandbox(), evaluator_image=_configured_evaluator_image())
+    for name, root in roots.items():
+        if not (root / ".git").exists():
+            continue
+        try:
+            revision = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                      capture_output=True, text=True, check=True, timeout=5)
+            changes = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                                     capture_output=True, text=True, check=True, timeout=5)
+            result[name + "_git"] = {"revision": revision.stdout.strip(), "dirty": bool(changes.stdout)}
+        except (OSError, subprocess.SubprocessError):
+            result[name + "_git"] = None
+    return result
+
+
 class RunRecorder:
     """Uniform on-disk record for every arm."""
 
@@ -73,6 +105,7 @@ class RunRecorder:
         self.arm = arm
         self.pack = pack
         self.config = config
+        self.environment = _environment(config.get("evaluator", "subprocess"))
         self.started = time.perf_counter()
         self.started_at = utc_now()
         self.evaluations = 0
@@ -101,6 +134,9 @@ class RunRecorder:
 
     def finish(self, *, best: Program | None, programs: list[Program], client: LedgerClient | None,
                outcome: dict[str, Any]) -> dict[str, Any]:
+        selected = self.results.get(best.id) if best is not None else None
+        claim_status = selected.claim_status if selected else "operator_diagnostic_only"
+        trusted_isolation = selected.trusted_isolation if selected else False
         if best is not None:
             bundle = write_frozen_bundle(best.source, self.out_dir / "best",
                                          metadata={"arm": self.arm, "origin": best.origin,
@@ -109,8 +145,8 @@ class RunRecorder:
             if result is not None:
                 (bundle / "public_qualification.json").write_text(
                     json.dumps({"program_id": best.id, "pack": self.pack.contract_id,
-                                "claim_status": "operator_diagnostic_only",
-                                "trusted_isolation": False, "qualified": result.qualified,
+                                "claim_status": claim_status,
+                                "trusted_isolation": trusted_isolation, "qualified": result.qualified,
                                 "families_passed": result.families_passed,
                                 "required_family_count": result.required_family_count,
                                 "fitness": result.fitness, "summary": result.summary(),
@@ -118,9 +154,10 @@ class RunRecorder:
                                default=_json_default) + "\n")
         manifest = {
             "schema_version": "linkpred-baseline-run.v1", "arm": self.arm, "pack": self.pack.contract_id,
-            "claim_status": "operator_diagnostic_only", "trusted_isolation": False,
+            "claim_status": claim_status, "trusted_isolation": trusted_isolation,
             "pack_root": str(self.pack.root), "started_at": self.started_at, "finished_at": utc_now(),
             "seconds": time.perf_counter() - self.started, "config": self.config,
+            "environment": self.environment,
             "evaluations": self.evaluations, "programs": len(programs),
             "client": client.usage() if client is not None else None,
             "best": None if best is None else {
@@ -204,7 +241,7 @@ def run_classical(pack: LinkPredictionPack, evaluator: CandidateEvaluator, out_d
     """Zero-model-call floor: every classical heuristic through the same qualification."""
     recorder = RunRecorder(out_dir, arm="classical", pack=pack,
                            config={"heuristics": list(heuristics), "extra": sorted(extra_solutions or {}),
-                                   "heldout": heldout})
+                                   "heldout": heldout, "evaluator": evaluator.backend})
     sources = classical_sources(pack, heuristics)
     sources.update(extra_solutions or {})
     programs: list[Program] = []
@@ -239,15 +276,19 @@ def run_classical(pack: LinkPredictionPack, evaluator: CandidateEvaluator, out_d
 def run_best_of_n(pack: LinkPredictionPack, evaluator: CandidateEvaluator, client: LedgerClient,
                   out_dir: Path, *, samples: int, seed: int = 0, stop_on_qualify: bool = True) -> dict[str, Any]:
     """Independent samples from the initial prompt; no feedback, no evolution."""
-    context = PromptContext.from_pack(pack, evaluator)
+    if samples < 0:
+        raise ValueError("samples must be nonnegative")
     config = {"samples": samples, "seed": seed, "stop_on_qualify": stop_on_qualify,
+              "evaluator": evaluator.backend,
               "max_llm_calls": client.max_calls}
     recorder = RunRecorder(out_dir, arm="best_of_n", pack=pack, config=config)
+    context = PromptContext.from_pack(pack, evaluator)
     system = SYSTEM_PROMPT
     programs: list[Program] = []
     seen: dict[str, Program] = {}
     first_qualified: int | None = None
     parse_failures = 0
+    stop_reason = "samples_exhausted"
     for index in range(samples):
         # A per-sample nonce keeps the ledger cache from collapsing N samples into one call.
         user = initial_prompt(context) + f"\n<!-- sample {index} seed {seed} -->\n"
@@ -255,6 +296,11 @@ def run_best_of_n(pack: LinkPredictionPack, evaluator: CandidateEvaluator, clien
             response = client.complete(system=system, user=user, tag=f"best_of_n:{index}")
         except BudgetExhausted as exc:
             recorder.record_iteration({"sample": index, "event": "budget_exhausted", "detail": str(exc)})
+            stop_reason = "budget_exhausted"
+            break
+        except Exception as exc:
+            recorder.record_iteration({"sample": index, "event": "client_error", "error_type": type(exc).__name__})
+            stop_reason = "client_error"
             break
         parsed = parse_program(response.text, parent_source=None, diff_based=False)
         if parsed.source is None:
@@ -281,10 +327,11 @@ def run_best_of_n(pack: LinkPredictionPack, evaluator: CandidateEvaluator, clien
         if program.qualified and first_qualified is None:
             first_qualified = index
             if stop_on_qualify:
+                stop_reason = "qualified"
                 break
     best = max(programs, key=_sort_key) if programs else None
     return recorder.finish(best=best, programs=programs, client=client,
-                           outcome={"first_qualified_sample": first_qualified,
+                           outcome={"stop_reason": stop_reason, "first_qualified_sample": first_qualified,
                                     "qualified": best is not None and best.qualified,
                                     "parse_failures": parse_failures, "samples_evaluated": len(programs)})
 
@@ -354,9 +401,12 @@ def select_parent(island: Island, rng: random.Random, config: EvolveConfig) -> P
 def run_evolve(pack: LinkPredictionPack, evaluator: CandidateEvaluator, client: LedgerClient, out_dir: Path,
                config: EvolveConfig) -> dict[str, Any]:
     """OpenEvolve-style loop: islands, MAP-Elites archive, diff mutations, migration, feedback."""
-    context = PromptContext.from_pack(pack, evaluator)
+    if config.islands < 1 or config.migration_interval < 0:
+        raise ValueError("islands must be positive and migration_interval nonnegative")
     recorder = RunRecorder(out_dir, arm="evolve", pack=pack,
-                           config={**config.as_dict(), "max_llm_calls": client.max_calls})
+                           config={**config.as_dict(), "max_llm_calls": client.max_calls,
+                                   "evaluator": evaluator.backend})
+    context = PromptContext.from_pack(pack, evaluator)
     rng = random.Random(config.seed)
     islands = [Island(i, config.complexity_bins) for i in range(config.islands)]
     seed_result = evaluator.evaluate(config.seed_program, label="seed")
@@ -395,6 +445,11 @@ def run_evolve(pack: LinkPredictionPack, evaluator: CandidateEvaluator, client: 
                                        tag=f"evolve:{iteration}:island{island.index}")
         except BudgetExhausted:
             stop_reason = "budget_exhausted"
+            break
+        except Exception as exc:
+            recorder.record_iteration({"iteration": iteration, "event": "client_error",
+                                       "error_type": type(exc).__name__})
+            stop_reason = "client_error"
             break
         parsed = parse_program(response.text, parent_source=parent.source, diff_based=config.diff_based)
         event: dict[str, Any] = {"iteration": iteration, "island": island.index, "parent_id": parent.id,

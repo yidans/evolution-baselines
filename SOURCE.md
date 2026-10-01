@@ -14,7 +14,10 @@ commit `53059b1b3e46f3c6b7291aeb2d30b24e10aa3561`, on 2026-09-27.
 Packaging changes rename the Python namespace, make benchmark lookup relative
 to the installed package, adjust generated evaluator imports, and remove the
 statistical module's unused controller imports. The search algorithms, scorer,
-data snapshot and statistical function bodies are preserved. The environment
+data snapshot and statistical function bodies were preserved at extraction. Subsequent
+comparison integration adds an optional direct Galahad evaluator, matched-budget
+run orchestration, request-failure accounting and public-only pack loading; see
+[the comparison guide](docs/GALAHAD_COMPARISON.md). The environment
 helper retains `AI_PROFESSOR_DISABLE_DOTENV=1` for compatibility with the tests.
 
 The full Galahad controller, Hermes deployment, RSI strategy layer and other

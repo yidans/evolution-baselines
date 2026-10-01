@@ -1,4 +1,4 @@
-"""``python -m evolution_baselines`` — run the baseline arms and the held-out gate."""
+"""Run comparison arms, public controller evaluation and historical diagnostics."""
 from __future__ import annotations
 
 import argparse
@@ -20,7 +20,10 @@ def _pack(args: argparse.Namespace) -> LinkPredictionPack:
     return LinkPredictionPack(Path(args.pack))
 
 
-def _evaluator(pack: LinkPredictionPack, out: Path) -> CandidateEvaluator:
+def _evaluator(pack: LinkPredictionPack, out: Path, backend: str = "subprocess") -> CandidateEvaluator:
+    if backend == "galahad":
+        from .galahad import GalahadEvaluator
+        return GalahadEvaluator(pack, out / "evaluator_work")
     return CandidateEvaluator(pack, out / "evaluator_work")
 
 
@@ -33,6 +36,7 @@ def _client(args: argparse.Namespace, out: Path, max_calls: int):
         scripted = payload if isinstance(payload, list) else payload["responses"]
     return build_client(args.client, out_dir=out, max_calls=max_calls, model=args.model,
                         reasoning_effort=args.reasoning_effort, scripted=scripted,
+                        max_output_tokens=args.max_output_tokens,
                         cache_path=Path(args.cache) if args.cache else None)
 
 
@@ -40,6 +44,7 @@ def _add_client_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--client", choices=["azure", "scripted", "replay"], default="azure")
     parser.add_argument("--model", default=None, help="Azure deployment name (default: AZURE_OPENAI_MODEL)")
     parser.add_argument("--reasoning-effort", default=None)
+    parser.add_argument("--max-output-tokens", type=int, default=16000)
     parser.add_argument("--scripted-file", default=None, help="JSON list of canned responses")
     parser.add_argument("--cache", default=None, help="replay cache path (default: <out>/llm_cache.jsonl)")
 
@@ -54,7 +59,7 @@ def cmd_classical(args: argparse.Namespace) -> int:
             raise SystemExit("--solution expects name=path")
         extra[name] = Path(path).read_text()
     heuristics = tuple(args.heuristics.split(",")) if args.heuristics else CLASSICAL_HEURISTICS
-    manifest = run_classical(pack, _evaluator(pack, out), out, heuristics=heuristics, extra_solutions=extra,
+    manifest = run_classical(pack, _evaluator(pack, out, args.evaluator), out, heuristics=heuristics, extra_solutions=extra,
                              heldout=args.heldout)
     print(json.dumps({k: manifest[k] for k in ("arm", "evaluations", "best", "outcome")}, indent=1))
     return 0
@@ -63,16 +68,18 @@ def cmd_classical(args: argparse.Namespace) -> int:
 def cmd_best_of_n(args: argparse.Namespace) -> int:
     pack = _pack(args)
     out = Path(args.out)
-    client = _client(args, out, args.max_calls or args.samples)
-    manifest = run_best_of_n(pack, _evaluator(pack, out), client, out, samples=args.samples, seed=args.seed,
+    evaluator = _evaluator(pack, out, args.evaluator)
+    client = _client(args, out, args.samples if args.max_calls is None else args.max_calls)
+    manifest = run_best_of_n(pack, evaluator, client, out, samples=args.samples, seed=args.seed,
                              stop_on_qualify=not args.no_stop_on_qualify)
     print(json.dumps({k: manifest[k] for k in ("arm", "evaluations", "client", "best", "outcome")}, indent=1))
-    return 0
+    return 1 if manifest["outcome"].get("stop_reason") == "client_error" else 0
 
 
 def cmd_evolve(args: argparse.Namespace) -> int:
     pack = _pack(args)
     out = Path(args.out)
+    evaluator = _evaluator(pack, out, args.evaluator)
     client = _client(args, out, args.max_calls)
     config = EvolveConfig(max_llm_calls=args.max_calls, max_iterations=args.max_iterations, islands=args.islands,
                           migration_interval=args.migration_interval, diff_based=not args.full_rewrite,
@@ -80,9 +87,9 @@ def cmd_evolve(args: argparse.Namespace) -> int:
                           num_top_programs=args.top_programs, num_diverse_programs=args.diverse_programs)
     if args.seed_program:
         config.seed_program = Path(args.seed_program).read_text()
-    manifest = run_evolve(pack, _evaluator(pack, out), client, out, config)
+    manifest = run_evolve(pack, evaluator, client, out, config)
     print(json.dumps({k: manifest[k] for k in ("arm", "evaluations", "client", "best", "outcome")}, indent=1))
-    return 0
+    return 1 if manifest["outcome"].get("stop_reason") == "client_error" else 0
 
 
 def cmd_heldout(args: argparse.Namespace) -> int:
@@ -111,7 +118,7 @@ def cmd_heldout(args: argparse.Namespace) -> int:
                           "hint": "pass --diagnostic to run an explicitly labelled operator diagnostic"},
                          indent=1))
         return 2
-    evaluator = _evaluator(pack, out)
+    evaluator = _evaluator(pack, out, args.evaluator)
     result = evaluator.heldout(source, label="heldout")
     payload = {"schema_version": "linkpred-baseline-heldout.v1",
                "gate": {"qualified": qualified, "diagnostic": bool(args.diagnostic),
@@ -153,9 +160,37 @@ def _heldout_markdown(payload: dict[str, Any]) -> str:
 def cmd_export_openevolve(args: argparse.Namespace) -> int:
     manifest = export_openevolve_project(_pack(args), Path(args.out), model=args.model, api_base=args.api_base,
                                          max_iterations=args.iterations, islands=args.islands,
-                                         population_size=args.population, reasoning_effort=args.reasoning_effort)
+                                         population_size=args.population, reasoning_effort=args.reasoning_effort,
+                                         evaluator_backend=args.evaluator)
     print(json.dumps(manifest, indent=1))
     return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    from .comparison import run_comparison
+    if args.client == "replay" or args.cache:
+        raise SystemExit("comparison runs use independent caches; replay each recorded arm separately")
+    result = run_comparison(
+        _pack(args), Path(args.out), seeds=args.seeds, max_calls=args.max_calls,
+        client_factory=lambda out, limit: _client(args, out, limit),
+        evaluator_factory=lambda pack, out: _evaluator(pack, out, args.evaluator),
+        islands=args.islands, stop_on_qualify=args.stop_on_qualify,
+    )
+    report_args = argparse.Namespace(
+        runs=[str(Path(args.out) / run["path"]) for run in result["runs"]],
+        out=str(Path(args.out) / "comparison.md"), json_out=str(Path(args.out) / "comparison_rows.json"),
+    )
+    cmd_report(report_args)
+    return 0 if result["complete"] else 1
+
+
+def cmd_qualify_galahad(args: argparse.Namespace) -> int:
+    from .galahad import qualify_run
+    receipt = qualify_run(Path(args.run), Path(args.project),
+                          control_root=Path(args.control_root) if args.control_root else None)
+    print(json.dumps({key: receipt.get(key) for key in
+                      ("status", "passed_family_count", "required_family_count", "problems")}, indent=2))
+    return 0 if receipt.get("status") == "pass" else 2
 
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -172,6 +207,17 @@ def cmd_report(args: argparse.Namespace) -> int:
         client = manifest.get("client") or {}
         best = manifest.get("best") or {}
         rows.append({"run": run_path.name, "arm": manifest.get("arm"), "calls": client.get("calls_used"),
+                     "seed": manifest.get("config", {}).get("seed"), "pack": manifest.get("pack"),
+                     "model": client.get("model"), "reasoning_effort": client.get("reasoning_effort"),
+                     "client_kind": client.get("client_kind"),
+                     "max_calls": client.get("max_calls"), "physical_calls": client.get("physical_calls"),
+                     "prompt_tokens": client.get("prompt_tokens"), "completion_tokens": client.get("completion_tokens"),
+                     "failed_calls": client.get("failed_calls"), "unknown_usage_calls": client.get("unknown_usage_calls"),
+                     "seconds": manifest.get("seconds"), "claim_status": manifest.get("claim_status"),
+                     "environment": manifest.get("environment"),
+                     "evaluator": manifest.get("config", {}).get("evaluator"),
+                     "stop_reason": manifest.get("outcome", {}).get("stop_reason"),
+                     "stop_on_qualify": manifest.get("config", {}).get("stop_on_qualify"),
                      "evaluations": manifest.get("evaluations"), "best_fitness": best.get("fitness"),
                      "families_passed": best.get("families_passed"), "qualified": best.get("qualified"),
                      "first_qualified": (manifest.get("outcome") or {}).get("first_qualified_iteration",
@@ -180,18 +226,28 @@ def cmd_report(args: argparse.Namespace) -> int:
                      "heldout_vs_strongest": None if held is None else held.get("mean_relative_to_rowwise_strongest"),
                      "heldout_vs_ra": None if held is None else held.get("mean_relative_to_ra"),
                      "heldout_claim": None if held is None else held.get("claim_status")})
-    lines = ["| run | arm | calls | evals | best fitness | families | qualified | first qualified | held-out vs strongest | held-out vs RA | held-out status |",
-             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    lines = ["| run | arm | seed | model | calls / cap | physical | tokens in / out | seconds | evals | fitness | families | qualified | evidence | stop |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for row in rows:
         if "error" in row:
             lines.append(f"| {row['run']} | {row['error']} |")
             continue
         def pct(v: Any) -> str:
             return f"{v:+.2%}" if isinstance(v, (int, float)) else "-"
-        lines.append(f"| {row['run']} | {row['arm']} | {row['calls']} | {row['evaluations']} | "
-                     f"{pct(row['best_fitness'])} | {row['families_passed']} | {row['qualified']} | "
-                     f"{row['first_qualified']} | {pct(row['heldout_vs_strongest'])} | {pct(row['heldout_vs_ra'])} | "
-                     f"{row['heldout_claim'] or '-'} |")
+        lines.append(f"| {row['run']} | {row['arm']} | {row['seed']} | {row['model']} | "
+                     f"{row['calls']} / {row['max_calls']} | {row['physical_calls']} | "
+                     f"{row['prompt_tokens']} / {row['completion_tokens']} | {row['seconds']} | "
+                     f"{row['evaluations']} | {pct(row['best_fitness'])} | {row['families_passed']} | "
+                     f"{row['qualified']} | {row['claim_status']} | {row['stop_reason']} |")
+    if getattr(args, "json_out", None):
+        Path(args.json_out).write_text(json.dumps(rows, indent=2) + "\n")
+    held_rows = [row for row in rows if row.get("heldout_claim")]
+    if held_rows:
+        lines.extend(["", "| run | held-out vs strongest | held-out vs RA | held-out status |",
+                      "| --- | --- | --- | --- |"])
+        for row in held_rows:
+            lines.append(f"| {row['run']} | {pct(row['heldout_vs_strongest'])} | "
+                         f"{pct(row['heldout_vs_ra'])} | {row['heldout_claim']} |")
     text = "\n".join(lines) + "\n"
     if args.out:
         Path(args.out).write_text(text)
@@ -205,6 +261,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     def common(p: argparse.ArgumentParser) -> None:
         p.add_argument("--pack", default=str(DEFAULT_PACK))
+        p.add_argument("--evaluator", choices=["subprocess", "galahad"], default="subprocess",
+                       help="local diagnostic worker or Galahad's isolated public evaluator")
 
     p = sub.add_parser("classical", help="zero-call floor: CN/AA/RA/Jaccard/PA/CAR through qualification")
     common(p)
@@ -240,7 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_client_args(p)
     p.set_defaults(func=cmd_evolve)
 
-    p = sub.add_parser("heldout", help="controller-private hidden evaluation, gated on public qualification")
+    p = sub.add_parser("heldout", help="historical test diagnostic using a matching public qualification receipt")
     common(p)
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument("--run", help="run directory with best/ (from any arm)")
@@ -263,7 +321,24 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("report", help="one comparison table over several run directories")
     p.add_argument("runs", nargs="+")
     p.add_argument("--out", default=None)
+    p.add_argument("--json-out", default=None)
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("compare", help="matched-budget best-of-N vs program evolution across replicate seeds")
+    common(p)
+    _add_client_args(p)
+    p.add_argument("--out", required=True)
+    p.add_argument("--max-calls", required=True, type=int, help="same logical-call cap for each arm and seed")
+    p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
+    p.add_argument("--islands", type=int, default=3)
+    p.add_argument("--stop-on-qualify", action="store_true", help="default is to use the full call budget")
+    p.set_defaults(func=cmd_compare, evaluator="galahad")
+
+    p = sub.add_parser("qualify-galahad", help="submit a selected program to an existing Galahad project's public qualification")
+    p.add_argument("--run", required=True)
+    p.add_argument("--project", required=True)
+    p.add_argument("--control-root", default=None)
+    p.set_defaults(func=cmd_qualify_galahad)
     return parser
 
 

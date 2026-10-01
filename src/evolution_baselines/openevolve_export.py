@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, {src!r})
 
-from evolution_baselines.evaluate import CandidateEvaluator  # noqa: E402
+from {evaluator_module} import {evaluator_class} as CandidateEvaluator  # noqa: E402
 from evolution_baselines.pack import LinkPredictionPack  # noqa: E402
 
 PACK = Path({pack!r})
@@ -133,14 +133,20 @@ def _initial_program() -> str:
 def export_openevolve_project(pack: LinkPredictionPack, destination: Path, *, model: str | None = None,
                               api_base: str | None = None, max_iterations: int = 600,
                               islands: int = 3, population_size: int = 60,
-                              reasoning_effort: str | None = None) -> dict[str, Any]:
+                              reasoning_effort: str | None = None,
+                              evaluator_backend: str = "subprocess") -> dict[str, Any]:
+    if evaluator_backend not in {"subprocess", "galahad"}:
+        raise ValueError("unknown evaluator backend")
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     src = str(Path(__file__).resolve().parents[1])
     model = model or os.environ.get("AZURE_OPENAI_MODEL") or "professor-gpt55"
     api_base = api_base or os.environ.get("AZURE_OPENAI_ENDPOINT") or "https://<resource>.openai.azure.com/openai/v1/"
     (destination / "initial_program.py").write_text(_initial_program())
-    (destination / "evaluator.py").write_text(EVALUATOR_TEMPLATE.format(src=src, pack=str(pack.root)))
+    module, cls = (("evolution_baselines.galahad", "GalahadEvaluator") if evaluator_backend == "galahad"
+                   else ("evolution_baselines.evaluate", "CandidateEvaluator"))
+    (destination / "evaluator.py").write_text(EVALUATOR_TEMPLATE.format(
+        src=src, pack=str(pack.root), evaluator_module=module, evaluator_class=cls))
     (destination / "run_openevolve.py").write_text(RUNNER_TEMPLATE.format(model=model))
     llm: dict[str, Any] = {"api_base": api_base, "models": [{"name": model, "weight": 1.0}],
                            "max_tokens": 16000, "timeout": 900, "retries": 2}
@@ -178,8 +184,10 @@ export OPENAI_API_KEY="$AZURE_OPENAI_API_KEY"
 python run_openevolve.py --iterations {max_iterations}
 ```
 
-This evaluator uses public instances only, but its subprocesses can access the host filesystem.
-All results are operator diagnostics; formal claims require the controller's isolated evaluator.
+Evaluator backend: `{evaluator_backend}`. The subprocess backend provides operator diagnostics;
+the Galahad backend uses its isolated generator/candidate/baseline/scorer execution path and
+requires Galahad installed in the same environment. Both use public instances only.
+Formal held-out claims retain the controller's qualification, review and freeze requirements.
 To screen the exported best program and create its local qualification receipt, run from the
 repository root (use a new output directory):
 
@@ -196,6 +204,7 @@ operator diagnostic and must never be fed back to program search.
 """
     (destination / "README.md").write_text(readme)
     manifest = {"pack": pack.contract_id, "model": model, "api_base": api_base, "max_iterations": max_iterations,
+                "evaluator": evaluator_backend,
                 "islands": islands, "population_size": population_size, "files": sorted(
                     p.name for p in destination.iterdir())}
     (destination / "export_manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
