@@ -129,11 +129,13 @@ class EvaluationResult:
     heldout: dict[str, Any] | None = None
     rows: list[dict[str, Any]] = field(default_factory=list)
     per_instance: list[dict[str, Any]] = field(default_factory=list)
+    claim_status: str = "operator_diagnostic_only"
+    trusted_isolation: bool = False
 
     def summary(self) -> dict[str, Any]:
         return {
-            "claim_status": "operator_diagnostic_only",
-            "trusted_isolation": False,
+            "claim_status": self.claim_status,
+            "trusted_isolation": self.trusted_isolation,
             "program_id": self.program_id,
             "scope": self.scope,
             "fitness": self.fitness,
@@ -176,6 +178,8 @@ def write_frozen_bundle(source: str, destination: Path, *, metadata: dict[str, A
 
 class CandidateEvaluator:
     """Run candidates on the pack's public (development) or hidden (held-out) instances."""
+
+    backend = "subprocess"
 
     def __init__(
         self,

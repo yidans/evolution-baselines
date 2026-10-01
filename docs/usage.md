@@ -1,5 +1,10 @@
 # Link-prediction baseline suite
 
+For matched-budget experiments against Galahad, use the new `compare` command
+and optional `--evaluator galahad` backend described in
+[GALAHAD_COMPARISON.md](GALAHAD_COMPARISON.md). Descriptions of subprocess timing
+and diagnostic status below refer to the original local backend.
+
 `src/evolution_baselines/` runs external-style search systems on the same
 `local_link_prediction_v2` pack Galahad uses, with the same statistical qualification
 code. It supports comparisons between strategy evolution and direct program search.

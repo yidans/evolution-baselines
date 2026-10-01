@@ -67,7 +67,7 @@ class AzureOpenAIClient:
         max_output_tokens: int = 16_000,
         reasoning_effort: str | None = None,
         timeout_seconds: float = 900.0,
-        max_retries: int = 2,
+        max_retries: int = 0,
     ) -> None:
         from openai import OpenAI
 
@@ -76,6 +76,8 @@ class AzureOpenAIClient:
         self.model = model
         self.max_output_tokens = int(max_output_tokens)
         self.reasoning_effort = reasoning_effort
+        if max_retries != 0:
+            raise ValueError("SDK retries must be disabled so every API attempt is charged")
         self._client = OpenAI(base_url=endpoint.rstrip("/") + "/", api_key=api_key,
                               timeout=timeout_seconds, max_retries=max_retries)
 
@@ -124,9 +126,15 @@ class LedgerClient:
                  cache_path: Path | None = None) -> None:
         self.inner = inner
         self.model = inner.model
+        self.request_settings = {
+            "reasoning_effort": getattr(inner, "reasoning_effort", None),
+            "max_output_tokens": getattr(inner, "max_output_tokens", None),
+        }
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.max_calls = int(max_calls)
+        if self.max_calls < 0:
+            raise ValueError("max_calls must be nonnegative")
         self.ledger_path = self.out_dir / "calls.jsonl"
         if self.ledger_path.exists():
             raise FileExistsError(f"run already has calls: {self.out_dir}; use a new output directory")
@@ -135,6 +143,8 @@ class LedgerClient:
         self.physical_calls = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        self.failed_calls = 0
+        self.unknown_usage_calls = 0
         self._cache: dict[str, dict[str, Any]] = {}
         if self.cache_path.is_file():
             for line in self.cache_path.read_text().splitlines():
@@ -154,27 +164,50 @@ class LedgerClient:
             raise BudgetExhausted(f"model-call budget exhausted ({self.max_calls})")
         key = self._key(system, user)
         hit = self._cache.get(key)
+        if hit is not None and "request_settings" in hit and hit["request_settings"] != self.request_settings:
+            hit = None
+        if hit is None and isinstance(self.inner, _ReplayOnlyClient):
+            raise BudgetExhausted(f"replay client has no cached response for {tag}")
+        self.calls_used += 1
         if hit is not None:
             response = LLMResponse(text=hit["text"], model=hit.get("model", self.model),
                                    prompt_tokens=hit.get("prompt_tokens"),
                                    completion_tokens=hit.get("completion_tokens"), seconds=0.0,
                                    cached=True)
         else:
-            response = self.inner.complete(system=system, user=user, tag=tag)
             self.physical_calls += 1
+            start = time.perf_counter()
+            try:
+                response = self.inner.complete(system=system, user=user, tag=tag)
+            except Exception as exc:
+                self.failed_calls += 1
+                self.unknown_usage_calls += 1
+                with self.ledger_path.open("a") as handle:
+                    handle.write(json.dumps({
+                        "call": self.calls_used, "tag": tag, "cached": False,
+                        "model": self.model, "status": "failed",
+                        "error_type": type(exc).__name__,
+                        "prompt_tokens": None, "completion_tokens": None,
+                        "seconds": time.perf_counter() - start,
+                    }) + "\n")
+                raise
             item = {"key": key, "text": response.text, "model": response.model,
                     "request_model": self.model,
+                    "request_settings": self.request_settings,
                     "prompt_tokens": response.prompt_tokens,
                     "completion_tokens": response.completion_tokens}
             self._cache[key] = item
             with self.cache_path.open("a") as handle:
                 handle.write(json.dumps(item) + "\n")
-        self.calls_used += 1
+        if response.prompt_tokens is None or response.completion_tokens is None:
+            self.unknown_usage_calls += 1
         self.prompt_tokens += int(response.prompt_tokens or 0)
         self.completion_tokens += int(response.completion_tokens or 0)
         with self.ledger_path.open("a") as handle:
             handle.write(json.dumps({
                 "call": self.calls_used, "tag": tag, "cached": response.cached, "model": response.model,
+                "status": "completed",
+                "request_settings": self.request_settings,
                 "prompt_sha256": key, "prompt_tokens": response.prompt_tokens,
                 "completion_tokens": response.completion_tokens, "seconds": response.seconds,
                 "system": system, "user": user, "response": response.text,
@@ -184,14 +217,19 @@ class LedgerClient:
     def usage(self) -> dict[str, Any]:
         return {"model": self.model, "max_calls": self.max_calls, "calls_used": self.calls_used,
                 "physical_calls": self.physical_calls, "cached_calls": self.calls_used - self.physical_calls,
+                "failed_calls": self.failed_calls, "unknown_usage_calls": self.unknown_usage_calls,
+                "client_kind": type(self.inner).__name__,
+                "reasoning_effort": getattr(self.inner, "reasoning_effort", None),
+                "max_output_tokens": getattr(self.inner, "max_output_tokens", None),
                 "prompt_tokens": self.prompt_tokens, "completion_tokens": self.completion_tokens}
 
 
 def build_client(kind: str, *, out_dir: Path, max_calls: int, model: str | None = None,
                  reasoning_effort: str | None = None, scripted: list[str] | None = None,
-                 cache_path: Path | None = None) -> LedgerClient:
+                 cache_path: Path | None = None, max_output_tokens: int = 16_000) -> LedgerClient:
     if kind == "azure":
-        inner: LLMClient = AzureOpenAIClient.from_env(model=model, reasoning_effort=reasoning_effort)
+        inner: LLMClient = AzureOpenAIClient.from_env(model=model, reasoning_effort=reasoning_effort,
+                                                     max_output_tokens=max_output_tokens)
     elif kind == "scripted":
         inner = ScriptedClient(scripted or [])
     elif kind == "replay":
@@ -204,7 +242,17 @@ def build_client(kind: str, *, out_dir: Path, max_calls: int, model: str | None 
             if len(models) != 1 or not all(isinstance(value, str) and value for value in models):
                 raise ValueError("set --model to the original request model for this legacy or mixed cache")
             model = models.pop()
+        settings = [json.loads(line).get("request_settings")
+                    for line in cache_path.read_text().splitlines() if line.strip()]
+        if settings and any(setting != settings[0] for setting in settings):
+            raise ValueError("replay requires a cache with one set of request settings")
+        recorded_settings = settings[0] if settings else None
+        if reasoning_effort is not None and recorded_settings and reasoning_effort != recorded_settings["reasoning_effort"]:
+            raise ValueError("replay reasoning effort differs from the recorded request")
         inner = _ReplayOnlyClient(model)
+        if recorded_settings:
+            inner.reasoning_effort = recorded_settings["reasoning_effort"]
+            inner.max_output_tokens = recorded_settings["max_output_tokens"]
     else:
         raise ValueError(f"unknown client kind {kind!r}")
     return LedgerClient(inner, out_dir, max_calls=max_calls, cache_path=cache_path)
@@ -215,6 +263,8 @@ class _ReplayOnlyClient:
 
     def __init__(self, model: str) -> None:
         self.model = model
+        self.reasoning_effort: str | None = None
+        self.max_output_tokens: int | None = None
 
     def complete(self, *, system: str, user: str, tag: str) -> LLMResponse:
         raise BudgetExhausted(f"replay client has no cached response for {tag}")

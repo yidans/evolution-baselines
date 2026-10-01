@@ -58,7 +58,11 @@ class LinkPredictionPack:
         self.bundle = self.root / "benchmark_bundle"
         self.dev_bundle = self.root / "development_benchmark_bundle"
         self.dev_manifest: dict[str, Any] = _read(self.dev_bundle / "benchmark_manifest.json")
-        self.hidden_registry: dict[str, Any] = _read(self.root / "hidden_registry.json")
+
+    @cached_property
+    def hidden_registry(self) -> dict[str, Any]:
+        """Read private inputs only for an explicit operator diagnostic."""
+        return _read(self.root / "hidden_registry.json")
 
     # ----------------------------------------------------------------- contract
     @property
@@ -165,10 +169,10 @@ class LinkPredictionPack:
     @cached_property
     def score(self) -> Callable[[dict[str, Any], Any], dict[str, float]]:
         """The pack's own role-blind scorer, loaded from ``benchmark_bundle/scorers/score.py``."""
-        return runpy.run_path(str(self.bundle / "scorers" / "score.py"))["score"]
+        return runpy.run_path(str(self.dev_bundle / "scorers" / "score.py"))["score"]
 
     def baseline_source(self, baseline_id: str) -> str:
-        path = self.bundle / "baselines" / baseline_id / "solution.py"
+        path = self.dev_bundle / "baselines" / baseline_id / "solution.py"
         if not path.is_file():
             raise FileNotFoundError(f"unknown pack baseline {baseline_id!r}")
         return path.read_text()

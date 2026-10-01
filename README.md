@@ -12,10 +12,15 @@ Galahad checkout, Hermes runtime and organization-repository access are not need
 | `export-openevolve` | Generate a project for the separately installed OpenEvolve implementation |
 | `heldout` | Operator-only hidden diagnostic using a matching local screening receipt |
 | `report` | Compare recorded runs |
+| `compare` | Matched-budget best-of-N and evolution over replicate seeds; Galahad evaluator by default |
+| `qualify-galahad` | Submit a selected program to an existing Galahad project's public qualification |
 
 The in-house `evolve` implementation is labelled **OpenEvolve-style**. The
 OpenEvolve export is an integration with the external package. Other evolution
 systems are not included in this snapshot.
+
+For collaboration, offline checks and experiment handoff, see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Install
 
@@ -72,20 +77,27 @@ See [the usage guide](docs/usage.md) for OpenEvolve setup, replay, reports,
 output files and comparison budgets. OpenEvolve is an optional external
 installation and is not installed by the default dependency set.
 
+For experiments against Galahad, start with [the comparison guide](docs/GALAHAD_COMPARISON.md).
+It uses Galahad's actual isolation and scoring path, an explicit shared call
+budget, and a common replicate schedule. Galahad remains an optional dependency.
+
 ## Evaluation and sharing
 
 The included `local_link_prediction_v2` snapshot has 24 public quality splits,
 three runtime envelopes and 16 operator-only hidden splits. Local screening
 uses Galahad's numerical qualification rules, including global runtime validity.
-All outputs are labelled `operator_diagnostic_only` and `trusted_isolation: false`.
+Subprocess outputs are labelled `operator_diagnostic_only` and `trusted_isolation: false`.
+The optional `--evaluator galahad` backend reports `controller_public_evaluation`
+with the actual execution isolation status.
 
-Candidate code runs in ordinary subprocesses with access to the host filesystem
+With the subprocess backend, candidate code can access the host filesystem
 and network. Use reviewed code on a disposable operator machine. Formal claims
 require the Galahad controller's isolated qualification/freeze/held-out flow.
 Never feed hidden measurements back into program search; see
 [data handling](docs/HIDDEN_DATA_RULES.md).
 
-Keep this repository private: it includes operator-only benchmark data and
-third-party material whose redistribution terms are not uniformly specified.
+This public repository contains the historical operator test data, so those
+splits are disclosed. Use fresh controller-only data for new formal
+generalization claims. Third-party redistribution terms are not uniformly specified.
 See [source provenance](SOURCE.md) and the benchmark's preserved
 [upstream README](src/evolution_baselines/benchmarks/local_link_prediction_v2/UPSTREAM_README.md).
